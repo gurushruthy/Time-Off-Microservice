@@ -18,6 +18,14 @@ See [TRD.md](TRD.md) for the full Technical Requirements Document including desi
            │  X-User-Role, X-User-Id (trusted headers)
            ▼
 [Time-Off Microservice :3000]
+ ├── GET    /time-off/balance                  ← get balance (cached, live fetch if stale)
+ ├── POST   /time-off/requests                 ← submit request (idempotency key required)
+ ├── GET    /time-off/requests                 ← list requests (optional status filter)
+ ├── PATCH  /time-off/requests/:id/cancel      ← cancel PENDING or APPROVED request
+ ├── GET    /time-off/requests/pending         ← list all PENDING (manager only)
+ ├── PATCH  /time-off/requests/:id/approve     ← approve request (commits to HCM)
+ ├── PATCH  /time-off/requests/:id/reject      ← reject request (releases pending hold)
+ └── POST   /admin/hcm/sync                   ← trigger manual batch sync (admin only)
       │              │
       │              ▼
       │         [SQLite DB]
@@ -26,7 +34,7 @@ See [TRD.md](TRD.md) for the full Technical Requirements Document including desi
       │         └── balance_sync_log   (audit trail)
       │
       ▼
- [HCM System :3001]
+ [HCM System]
  ├── GET    /hcm/balance           ← read current balance (realtime)
  ├── GET    /hcm/balance/batch     ← full corpus (batch sync, every 6h)
  ├── POST   /hcm/time-off          ← commit approved request
