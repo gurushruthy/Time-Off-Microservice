@@ -197,8 +197,13 @@ export class TimeOffService {
     const availableToReserve = Number(hcmData.hcmAvailableBalance) - currentPending;
 
     if (availableToReserve < Number(request.daysRequested)) {
+      const note = `Automatically rejected: insufficient balance at approval time (available=${availableToReserve}, requested=${request.daysRequested})`;
+      await this.requestRepo.update(id, { status: TimeOffStatus.REJECTED, note });
+      if (balance) {
+        await this.balanceService.decrementPending(balance.id, Number(request.daysRequested));
+      }
       throw new UnprocessableEntityException(
-        `Insufficient balance for approval: available=${availableToReserve}, requested=${request.daysRequested}`,
+        `Request has been automatically rejected due to insufficient balance (available=${availableToReserve}, requested=${request.daysRequested}).`,
       );
     }
 

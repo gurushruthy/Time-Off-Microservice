@@ -484,6 +484,55 @@ describe('Time-Off Microservice E2E', () => {
     expect(createRes2.status).toBe(201);
   });
 
+  // ─── Scenario 13b: Auto-reject on insufficient balance at approve time ──────
+  it('Scenario 13b: Insufficient balance at approve time → auto-rejected with note, pendingBalance released', async () => {
+    const createRes = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-auto-reject-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-10',
+        daysRequested: 9,
+      });
+    expect(createRes.status).toBe(201);
+    const requestId = createRes.body.id;
+
+    // Drain the balance so approval will fail
+    await simulateYearReset('location-1', 1);
+    await asAdmin(request(app.getHttpServer())
+      .post('/admin/hcm/sync')
+      .set('X-User-Role', 'admin')
+      .set('X-User-Id', 'admin-1'))
+      .expect(200);
+
+    const approveRes = await asManager(request(app.getHttpServer())
+      .patch(`/time-off/requests/${requestId}/approve`));
+    expect(approveRes.status).toBe(422);
+    expect(approveRes.body.message).toContain('automatically rejected');
+
+    // Request should now be REJECTED with auto-generated note
+    const listRes = await asEmployee(request(app.getHttpServer())
+      .get('/time-off/requests?employeeId=employee-1'));
+    const req = listRes.body.find((r: any) => r.id === requestId);
+    expect(req.status).toBe('REJECTED');
+    expect(req.note).toContain('Automatically rejected');
+
+    // pendingBalance should be released — new request for same days should succeed
+    const createRes2 = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-after-auto-reject-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-08-01',
+        endDate: '2026-08-02',
+        daysRequested: 1,
+      });
+    expect(createRes2.status).toBe(201);
+  });
+
   // ─── Scenario 14: Year-start reset ───────────────────────────────────────
   it('Scenario 14: Year-start reset → admin sync → balance updated', async () => {
     await simulateYearReset('location-1', 20);

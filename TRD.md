@@ -173,7 +173,7 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 
 1. Verify request is PENDING — return 422 otherwise.
 2. Call HCM realtime API to re-fetch `hcmAvailableBalance` (balance may have changed since submission).
-3. Pre-validate: compute `availableToReserve = hcmAvailableBalance - pendingBalance`. If `availableToReserve < daysRequested` → return 422 (fast-fail, no HCM write yet).
+3. Pre-validate: compute `availableToReserve = hcmAvailableBalance - pendingBalance`. If `availableToReserve < daysRequested` → auto-reject the request with a system-generated note (e.g. "Automatically rejected: insufficient balance at approval time (available=X, requested=Y)"), release `pendingBalance`, and return 422 to the manager with a message indicating the request has been automatically rejected. The employee will see the REJECTED status and the note on their next `GET /time-off/requests` call. The manager does not need to take any further action.
 4. Call HCM submit endpoint. HCM response is the final authority.
 5. If HCM errors → return 422/503, leave local state unchanged.
 6. On HCM success: set status=APPROVED, decrement `pendingBalance` and `hcmAvailableBalance` by `daysRequested`, store `hcmTransactionId`.
@@ -210,7 +210,7 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 1. Call HCM batch endpoint — receives full corpus of balances.
 2. Upsert `hcmAvailableBalance` and `lastSyncedAt` for each record.
 3. `pendingBalance` is never touched — it reflects ReadyOn's uncommitted holds, which HCM does not know about.
-4. If new `hcmAvailableBalance` < current `pendingBalance`: no action. Existing PENDING requests will naturally fail the live HCM check on approval.
+4. If new `hcmAvailableBalance` < current `pendingBalance`: no action. Existing PENDING requests will naturally fail the live HCM check on approval. **Production enhancement:** The cron could auto-reject PENDING requests that can no longer be fulfilled, setting status=REJECTED with an auto-generated note (e.g. "Automatically rejected: insufficient balance after HCM sync"). This clears the manager's queue and notifies the employee immediately rather than waiting for a manager action that will always result in rejection anyway. The key open question is ordering — if an employee has multiple PENDING requests and the balance only covers some of them, a policy must be defined for which to reject (e.g. newest first, largest first, or all). This ordering decision requires product input and is left as a future enhancement.
 5. Log to `balance_sync_log` with source=BATCH_CRON. Other sources used elsewhere: REALTIME_PULL (logged on stale cache refresh during `GET /balance`), REQUEST (logged on live fetch during `POST /time-off/requests`).
 
 ---
@@ -281,21 +281,19 @@ Even with a fresh HCM balance, local pending holds must be subtracted — HCM do
 
 **Decision:** `GET /time-off/requests/pending` returns raw request rows only — no balance information is attached.
 
-**Why:** Enriching each pending request with a live HCM balance would require one HCM call per unique `employeeId + locationId` combination in the list. For a manager reviewing 50 requests across 20 employees, that is 20 sequential or parallel HCM calls just to render a list — expensive, slow, and fragile if HCM is degraded.
-
-**Using cached balance is not a solution:** Returning `hcmAvailableBalance` from the local cache would be fast but defeats the purpose. If HCM changed the balance out-of-band (anniversary bonus, year-start reset, HR manual correction), the cache would show the old higher value and the manager would proceed to approve — only to get a 422 at approve time. The cache cannot be trusted for a decision that matters.
-
-**The accepted tradeoff:** The pending list is intentionally a lightweight read. The manager gets an overview of what needs a decision, not a pre-validated approval surface. Correctness is enforced at approve time via a live HCM re-fetch — not at list time. The 422 with a descriptive error message (`"Insufficient balance: available=1, requested=9"`) is the safety net. After receiving the 422, the manager explicitly rejects the request with an optional `note` field explaining the reason — the employee then sees the REJECTED status and the note on their next `GET /time-off/requests` call, giving them full context.
-
-**In production:** The manager UI would call `GET /time-off/balance` for the specific employee when the manager opens an individual request detail view — one HCM call on demand, not N calls on list load. This keeps the list fast and the detail view accurate.
+**Why:** The manager does not need to see the balance to act on requests. Balance correctness is enforced automatically by the system at approve time via a live HCM re-fetch — if the balance is insufficient, the request is auto-rejected with a system-generated note and the manager does not need to take any further action. The pending list is a queue of requests that need a decision, not a pre-validated approval surface.
 
 ### 7.7 ReadyOn pulls from HCM (not HCM pushing)
 
-**Decision:** ReadyOn runs a scheduled cron job (every 6 hours) calling HCM's batch endpoint.
+**Decision:** ReadyOn runs a scheduled cron job (every 6 hours) calling HCM's batch endpoint, which returns the full corpus of all employee balances.
 
 **Why:** Enterprise HCMs (Workday, SAP) expose REST APIs for consumers to call. They do not push webhooks to downstream systems.
 
 **Alternative rejected:** HCM pushes via webhooks. Assumes webhook capability most enterprise HCMs don't have, and adds inbound surface area and authentication complexity.
+
+**Delta sync (incremental pull):** An ideal optimization would be to pass a `since` timestamp to the batch endpoint — e.g. `GET /hcm/balance/batch?since=<last_sync_time>` — so HCM returns only records that changed since the last sync. For 10 million employees where only 500 had balance changes in the last 6 hours, this would pull 500 records instead of 10 million. However, the brief specifies HCM provides the "whole corpus" — implying full exports only, not delta endpoints. This is consistent with how most enterprise HCMs work in practice. If the specific HCM integration does support a `since` parameter, delta sync should be adopted — it would also eliminate the need for chunked processing at scale. This should be confirmed with the HCM vendor before production deployment.
+
+**Production scale concern:** The current implementation fetches all records into memory and processes them one by one. At 10 million records this would exhaust Node.js heap memory and issue 30 million sequential DB operations. In production, the batch sync should use paginated HCM fetches, chunked DB writes (e.g. 500 records per transaction), and bulk upsert (`INSERT ... ON CONFLICT DO UPDATE`) to handle scale efficiently.
 
 ---
 
@@ -375,6 +373,7 @@ Full HTTP flow against a running NestJS app (port 3000) with the mock HCM server
 | 12 | Cancel APPROVED → HCM reversed → balance restored immediately (no sync wait) |
 | 12b | Cancel APPROVED when HCM down → 503, request stays APPROVED (fail closed) |
 | 13 | Reject → pendingBalance released → resubmit succeeds |
+| 13b | Insufficient balance at approve time → auto-rejected with note, pendingBalance released, manager gets 422 |
 | 14 | Year-start reset → admin sync → balance updated |
 | 15 | Same Idempotency-Key → same response, balance deducted once |
 | 16 | Missing Idempotency-Key → 400 |

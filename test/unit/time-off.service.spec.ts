@@ -314,6 +314,22 @@ describe('TimeOffService', () => {
 
       await expect(service.approveRequest('req-1')).rejects.toThrow(UnprocessableEntityException);
     });
+
+    it('should auto-reject and throw 422 when balance is insufficient at approval time', async () => {
+      const pendingReq = makeRequest({ status: TimeOffStatus.PENDING, daysRequested: 10 });
+      requestRepo.findOne.mockResolvedValue(pendingReq);
+      hcmClient.getBalance.mockResolvedValue({ hcmAvailableBalance: 3 });
+      balanceRepo.findOne.mockResolvedValue(makeBalance({ pendingBalance: 0 }));
+      requestRepo.update.mockResolvedValue({});
+      balanceService.decrementPending.mockResolvedValue(undefined);
+
+      await expect(service.approveRequest('req-1')).rejects.toThrow(UnprocessableEntityException);
+      expect(requestRepo.update).toHaveBeenCalledWith('req-1', {
+        status: TimeOffStatus.REJECTED,
+        note: expect.stringContaining('Automatically rejected'),
+      });
+      expect(balanceService.decrementPending).toHaveBeenCalled();
+    });
   });
 
   describe('rejectRequest', () => {
