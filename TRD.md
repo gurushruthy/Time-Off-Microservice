@@ -15,7 +15,7 @@ The core problem is **keeping balances consistent between two systems**. This is
 
 - ReadyOn is not the only system writing to HCM — HR can make manual adjustments, anniversary bonuses can fire, year-start resets can run, all without ReadyOn's knowledge
 - HCM should return errors for invalid requests (insufficient balance, bad dimensions) but this is not guaranteed — ReadyOn must be defensive
-- Two employees (or the same employee from two browser tabs) could submit concurrent requests that both appear valid before either deduction is committed
+- The same employee could submit concurrent requests (e.g. two browser tabs) that both appear valid before either deduction is committed
 
 ---
 
@@ -162,10 +162,10 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 2. If a request with that key already exists, return it (idempotent retry).
 3. Check for date overlap with existing PENDING or APPROVED requests for the same employee/location — return 422 if overlap found.
 4. Call HCM realtime API to fetch fresh `hcmAvailableBalance`.
-5. Check `availableToReserve = hcmAvailableBalance - pendingBalance >= daysRequested` — return 422 if insufficient.
+5. Compute `availableToReserve = hcmAvailableBalance - pendingBalance`. If `availableToReserve < daysRequested` → return 422.
 6. SQLite transaction:
    - Insert `time_off_request` with status=PENDING.
-   - `UPDATE time_off_balance SET pendingBalance += daysRequested, version = version + 1 WHERE version = :v` (optimistic lock).
+   - `UPDATE time_off_balance SET pendingBalance = pendingBalance + daysRequested, version = version + 1 WHERE id = :id AND version = :v` (optimistic lock — `:id` identifies the employee+location balance row, `:v` is the version read in step 4).
    - If 0 rows updated → return 409 (concurrent write won the race; client retries from step 2).
 7. Return 201 with the created request.
 
@@ -173,7 +173,7 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 
 1. Verify request is PENDING — return 422 otherwise.
 2. Call HCM realtime API to re-fetch `hcmAvailableBalance` (balance may have changed since submission).
-3. Pre-validate: `hcmAvailableBalance - pendingBalance >= daysRequested` — return 422 if insufficient (fast-fail, no HCM write yet).
+3. Pre-validate: compute `availableToReserve = hcmAvailableBalance - pendingBalance`. If `availableToReserve < daysRequested` → return 422 (fast-fail, no HCM write yet).
 4. Call HCM submit endpoint. HCM response is the final authority.
 5. If HCM errors → return 422/503, leave local state unchanged.
 6. On HCM success: set status=APPROVED, decrement `pendingBalance` and `hcmAvailableBalance` by `daysRequested`, store `hcmTransactionId`.
@@ -194,9 +194,9 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 
 1. Guard: if `hcmTransactionId` is null (should not happen in normal flow but possible if a partial failure occurred during approval), return 422 — do not call HCM.
 2. Call HCM to cancel the transaction (`hcmTransactionId`). HCM reverses the deduction on its side.
-2. If HCM errors → return 503, leave all local state unchanged (fail closed — request stays APPROVED, cache untouched).
-3. On HCM success: set status=CANCELLED.
-4. Immediately re-fetch `hcmAvailableBalance` from HCM's realtime API and overwrite the local cache. Because HCM has already restored the days, the fresh fetch reflects the correct restored balance without waiting for the next batch sync. ReadyOn does **not** manually add days back to the cache — it trusts HCM's response as the source of truth.
+3. If HCM errors → return 503, leave all local state unchanged (fail closed — request stays APPROVED, cache untouched).
+4. On HCM success: set status=CANCELLED.
+5. Immediately re-fetch `hcmAvailableBalance` from HCM's realtime API and overwrite the local cache. Because HCM has already restored the days, the fresh fetch reflects the correct restored balance without waiting for the next batch sync. ReadyOn does **not** manually add days back to the cache — it trusts HCM's response as the source of truth.
 
 **Degraded path (HCM cancel API not available):**
 
@@ -221,7 +221,7 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 
 **Decision:** Reserve days in `pendingBalance` at submission. HCM deduction happens only on approval.
 
-**Why:** If reservation only happens on approval, two requests could both be submitted and approved before either reservation is recorded — over-committing the balance. Reserving on PENDING blocks the balance during the manager review window.
+**Why:** If reservation only happens on approval, the same employee could submit two requests that both get approved before either reservation is recorded — over-committing the balance. Reserving on PENDING blocks the balance during the manager review window.
 
 **Trade-off:** Days are tied up while a request awaits approval. Released on reject or cancel. Mirrors how real booking systems work (hold → confirm or release).
 
@@ -229,9 +229,9 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 
 ### 7.2 Optimistic locking on balance updates
 
-**Decision:** `version` field on `time_off_balance`. Every update uses `WHERE version = :v` and increments the version. Zero rows updated = concurrent write won the race → 409, client retries.
+**Decision:** `version` field on `time_off_balance`. Every update uses `WHERE id = :id AND version = :v` and increments the version. If another write updated the row between the read and this update, the version in the DB will no longer match `:v`, so the condition matches zero rows → return 409, client retries with fresh data.
 
-**Why:** Two concurrent requests both read the same balance row, both pass the check, both try to deduct. The version field acts as a compare-and-swap: only the first writer succeeds; the second retries with fresh data and correctly fails the balance check.
+**Why:** Two concurrent requests from the same employee both read the same balance row, both pass the check, both try to deduct. The version field acts as a compare-and-swap: only the first writer succeeds; the second retries with fresh data and correctly fails the balance check.
 
 **Alternative rejected:** Pessimistic row locking (`SELECT FOR UPDATE`). Serialises all balance reads, hurting throughput. Optimistic locking is better for low-contention workloads like time-off requests.
 
@@ -255,6 +255,8 @@ availableToReserve = hcmAvailableBalance (fresh from HCM) - pendingBalance (loca
 ```
 
 Even with a fresh HCM balance, local pending holds must be subtracted — HCM does not know about them yet.
+
+**Why TTL-based and not event-driven invalidation:** The ideal cache invalidation strategy would be to invalidate on known write events (approval, rejection, cancellation) rather than on time. ReadyOn already does this correctly — every operation that changes the HCM balance (cancel-of-APPROVED) immediately re-fetches from HCM. Operations that only change `pendingBalance` (reject, cancel-of-PENDING) do not touch the HCM cache because HCM's side is unaffected. However, HCM changes balances out-of-band (anniversary bonuses, year-start resets, HR manual corrections) without notifying ReadyOn. Since there is no event to listen to for these changes, a time-based TTL is the necessary safety net — it exists specifically to catch out-of-band HCM changes that ReadyOn cannot know about, not as a general caching strategy.
 
 **Alternative rejected:** Pull from HCM on every read. Too expensive for high-frequency page loads and manager views.
 
@@ -314,12 +316,18 @@ Even with a fresh HCM balance, local pending holds must be subtracted — HCM do
 
 ---
 
-## 9. Non-Goals & Assumptions
+## 9. Authorization
 
-- **Auth/authorization:** Two layers are implemented:
-  - **Role-based:** A `RolesGuard` reads the `X-User-Role` header (`employee`, `manager`, `admin`) forwarded by the upstream API gateway after JWT validation. The microservice trusts this header without re-verifying the token. Missing header → 401; wrong role → 403.
-  - **User-level scoping:** The `X-User-Id` header (also gateway-forwarded) is checked against the resource being accessed. Employees can only view their own balance, submit requests for themselves, list their own requests, and cancel their own requests. Managers are not subject to this restriction — they act across all employees. Ownership is enforced in the controller for query-param checks and in the service for resource-level checks (e.g. cancel verifies `request.employeeId === userId` after fetching from DB).
-  - In production both headers would be paired with network-level controls so the microservice is only reachable via the gateway, preventing header spoofing.
+Two layers of authorization are implemented:
+
+- **Role-based:** A `RolesGuard` reads the `X-User-Role` header (`employee`, `manager`, `admin`) forwarded by the upstream API gateway after JWT validation. The microservice trusts this header without re-verifying the token. Missing header → 401; wrong role → 403. The `admin` role is an internal ReadyOn platform/ops role, accessible only to internal operators via internal tooling behind network-level controls — not a customer-facing role.
+- **User-level scoping:** The `X-User-Id` header (also gateway-forwarded) is checked against the resource being accessed. Employees can only view their own balance, submit requests for themselves, list their own requests, and cancel their own requests. Managers are not subject to this restriction — they act across all employees. Ownership is enforced in the controller for query-param checks and in the service for resource-level checks (e.g. cancel verifies `request.employeeId === userId` after fetching from DB).
+- In production both headers would be paired with network-level controls so the microservice is only reachable via the gateway, preventing header spoofing.
+
+---
+
+## 10. Non-Goals & Assumptions
+
 - **Calendar/business-day calculation:** Out of scope. The client supplies `daysRequested`. This varies by location, country, and holiday calendar — not derivable server-side without locale knowledge. The service stores `startDate`/`endDate` for overlap detection only.
 - **leaveType:** Out of scope per the spec. A `leaveType` dimension (VACATION, SICK, PERSONAL) would be added in production to support separate leave buckets.
 - **Audit trail:** `balance_sync_log` provides a full history of every balance change — when it happened, what triggered it (cron, manual, request), and what the before/after values were. What is not tracked is request status transition history (PENDING → APPROVED → CANCELLED). A `time_off_request_events` table would be recommended in production to record every status change with a timestamp and actor. Currently status transitions are only visible via `updatedAt` on the request row, which is overwritten on each change.
@@ -370,6 +378,9 @@ Full HTTP flow against a running NestJS app (port 3000) with the mock HCM server
 | 14 | Year-start reset → admin sync → balance updated |
 | 15 | Same Idempotency-Key → same response, balance deducted once |
 | 16 | Missing Idempotency-Key → 400 |
+| 17a-note | Reject with note → employee sees note on request |
+| 17b-note | Cancel with note → note is saved on request |
+| 17c-note | Reject without note → note is null |
 | 17a | Filter requests by status=PENDING → only PENDING returned |
 | 17b | Filter requests by status=APPROVED → only APPROVED returned |
 | 17c | No status filter → all statuses returned |
