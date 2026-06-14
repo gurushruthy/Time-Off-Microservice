@@ -1,6 +1,6 @@
 # Technical Requirements Document — Time-Off Microservice
 
-**Author:** ReadyOn AI Engineering  
+**Author:** Guru Shruthy Guru Moorthy  
 **Status:** Final  
 
 ---
@@ -180,7 +180,7 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 
 ### PATCH /reject
 
-1. Set status=REJECTED.
+1. Set status=REJECTED with an optional `note` (max 500 chars).
 2. Decrement `pendingBalance` by `daysRequested` (reservation released, no HCM call).
 
 ### PATCH /cancel (PENDING)
@@ -283,7 +283,7 @@ Even with a fresh HCM balance, local pending holds must be subtracted — HCM do
 
 **Using cached balance is not a solution:** Returning `hcmAvailableBalance` from the local cache would be fast but defeats the purpose. If HCM changed the balance out-of-band (anniversary bonus, year-start reset, HR manual correction), the cache would show the old higher value and the manager would proceed to approve — only to get a 422 at approve time. The cache cannot be trusted for a decision that matters.
 
-**The accepted tradeoff:** The pending list is intentionally a lightweight read. The manager gets an overview of what needs a decision, not a pre-validated approval surface. Correctness is enforced at approve time via a live HCM re-fetch — not at list time. The 422 with a descriptive error message (`"Insufficient balance: available=1, requested=9"`) is the safety net.
+**The accepted tradeoff:** The pending list is intentionally a lightweight read. The manager gets an overview of what needs a decision, not a pre-validated approval surface. Correctness is enforced at approve time via a live HCM re-fetch — not at list time. The 422 with a descriptive error message (`"Insufficient balance: available=1, requested=9"`) is the safety net. After receiving the 422, the manager explicitly rejects the request with an optional `note` field explaining the reason — the employee then sees the REJECTED status and the note on their next `GET /time-off/requests` call, giving them full context.
 
 **In production:** The manager UI would call `GET /time-off/balance` for the specific employee when the manager opens an individual request detail view — one HCM call on demand, not N calls on list load. This keeps the list fast and the detail view accurate.
 
