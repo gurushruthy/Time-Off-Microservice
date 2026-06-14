@@ -109,6 +109,7 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 | daysRequested | decimal | Supplied by client; service does not derive from dates |
 | status | enum | PENDING / APPROVED / REJECTED / CANCELLED |
 | hcmTransactionId | varchar nullable | Returned by HCM on approval |
+| note | varchar nullable | Optional note added on reject or cancel — visible to the employee |
 | createdAt | datetime | |
 | updatedAt | datetime | |
 
@@ -134,8 +135,8 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 |---|---|---|
 | `GET` | `/time-off/balance` | Get balance for `?employeeId=&locationId=`. Fetches fresh from HCM if local record is stale (>15 min). |
 | `POST` | `/time-off/requests` | Submit a time-off request. Requires `Idempotency-Key` header. |
-| `GET` | `/time-off/requests` | List requests for `?employeeId=`. |
-| `PATCH` | `/time-off/requests/:id/cancel` | Cancel a PENDING or APPROVED request. PENDING cancellations release the local pending hold only. APPROVED cancellations call HCM to reverse the committed transaction before updating local state. |
+| `GET` | `/time-off/requests` | List requests for `?employeeId=`. Optional `?status=` filter (PENDING, APPROVED, REJECTED, CANCELLED). |
+| `PATCH` | `/time-off/requests/:id/cancel` | Cancel a PENDING or APPROVED request. Optional `{ "note": "..." }` body. PENDING cancellations release the local pending hold only. APPROVED cancellations call HCM to reverse the committed transaction before updating local state. |
 
 ### Manager endpoints
 
@@ -143,7 +144,7 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 |---|---|---|
 | `GET` | `/time-off/requests/pending` | List all PENDING requests. |
 | `PATCH` | `/time-off/requests/:id/approve` | Approve a request (triggers live HCM write). |
-| `PATCH` | `/time-off/requests/:id/reject` | Reject a request (releases pending balance). |
+| `PATCH` | `/time-off/requests/:id/reject` | Reject a request (releases pending balance). Optional `{ "note": "..." }` body — visible to the employee on their request. |
 
 ### Admin endpoint
 
@@ -273,7 +274,19 @@ Even with a fresh HCM balance, local pending holds must be subtracted — HCM do
 
 **Alternative considered:** Remove the pre-approve `getBalance` and rely on HCM's `submitRequest` error response as the sole gate. This reduces approve from 2 HCM calls to 1. Rejected because the brief explicitly states HCM errors are not guaranteed — a silent approval against insufficient balance is a worse outcome than slightly higher latency.
 
-### 7.6 ReadyOn pulls from HCM (not HCM pushing)
+### 7.6 Pending list does not include live balance
+
+**Decision:** `GET /time-off/requests/pending` returns raw request rows only — no balance information is attached.
+
+**Why:** Enriching each pending request with a live HCM balance would require one HCM call per unique `employeeId + locationId` combination in the list. For a manager reviewing 50 requests across 20 employees, that is 20 sequential or parallel HCM calls just to render a list — expensive, slow, and fragile if HCM is degraded.
+
+**Using cached balance is not a solution:** Returning `hcmAvailableBalance` from the local cache would be fast but defeats the purpose. If HCM changed the balance out-of-band (anniversary bonus, year-start reset, HR manual correction), the cache would show the old higher value and the manager would proceed to approve — only to get a 422 at approve time. The cache cannot be trusted for a decision that matters.
+
+**The accepted tradeoff:** The pending list is intentionally a lightweight read. The manager gets an overview of what needs a decision, not a pre-validated approval surface. Correctness is enforced at approve time via a live HCM re-fetch — not at list time. The 422 with a descriptive error message (`"Insufficient balance: available=1, requested=9"`) is the safety net.
+
+**In production:** The manager UI would call `GET /time-off/balance` for the specific employee when the manager opens an individual request detail view — one HCM call on demand, not N calls on list load. This keeps the list fast and the detail view accurate.
+
+### 7.7 ReadyOn pulls from HCM (not HCM pushing)
 
 **Decision:** ReadyOn runs a scheduled cron job (every 6 hours) calling HCM's batch endpoint.
 
@@ -356,6 +369,9 @@ Full HTTP flow against a running NestJS app (port 3000) with the mock HCM server
 | 14 | Year-start reset → admin sync → balance updated |
 | 15 | Same Idempotency-Key → same response, balance deducted once |
 | 16 | Missing Idempotency-Key → 400 |
+| 17a | Filter requests by status=PENDING → only PENDING returned |
+| 17b | Filter requests by status=APPROVED → only APPROVED returned |
+| 17c | No status filter → all statuses returned |
 | 17 | Overlapping dates → 422 |
 
 ---

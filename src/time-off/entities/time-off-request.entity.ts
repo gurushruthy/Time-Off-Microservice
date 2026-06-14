@@ -42,6 +42,9 @@ export class TimeOffRequest {
   @Column({ type: 'varchar', nullable: true })
   hcmTransactionId: string | null;
 
+  @Column({ type: 'varchar', nullable: true })
+  note: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

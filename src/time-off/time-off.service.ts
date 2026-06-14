@@ -115,11 +115,20 @@ export class TimeOffService {
     return { request: savedRequest, isNew: true };
   }
 
-  async listRequests(employeeId: string): Promise<TimeOffRequest[]> {
-    return this.requestRepo.find({ where: { employeeId }, order: { createdAt: 'DESC' } });
+  async listRequests(employeeId: string, status?: string): Promise<TimeOffRequest[]> {
+    const where: any = { employeeId };
+    if (status) {
+      if (!Object.values(TimeOffStatus).includes(status as TimeOffStatus)) {
+        throw new BadRequestException(
+          `Invalid status "${status}". Must be one of: ${Object.values(TimeOffStatus).join(', ')}`,
+        );
+      }
+      where.status = status as TimeOffStatus;
+    }
+    return this.requestRepo.find({ where, order: { createdAt: 'DESC' } });
   }
 
-  async cancelRequest(id: string, userId: string): Promise<TimeOffRequest> {
+  async cancelRequest(id: string, userId: string, note?: string): Promise<TimeOffRequest> {
     const request = await this.requestRepo.findOne({ where: { id } });
     if (!request) {
       throw new NotFoundException(`Request ${id} not found`);
@@ -129,7 +138,7 @@ export class TimeOffService {
     }
 
     if (request.status === TimeOffStatus.PENDING) {
-      await this.requestRepo.update(id, { status: TimeOffStatus.CANCELLED });
+      await this.requestRepo.update(id, { status: TimeOffStatus.CANCELLED, note: note ?? null });
 
       const balance = await this.balanceRepo.findOne({
         where: { employeeId: request.employeeId, locationId: request.locationId },
@@ -138,10 +147,15 @@ export class TimeOffService {
         await this.balanceService.decrementPending(balance.id, Number(request.daysRequested));
       }
     } else if (request.status === TimeOffStatus.APPROVED) {
+      if (!request.hcmTransactionId) {
+        throw new UnprocessableEntityException(
+          `Cannot cancel request ${id}: APPROVED but missing HCM transaction ID`,
+        );
+      }
       // Fail closed — if HCM cannot confirm the reversal, do not change local state
       await this.hcmClient.cancelTransaction(request.hcmTransactionId);
 
-      await this.requestRepo.update(id, { status: TimeOffStatus.CANCELLED });
+      await this.requestRepo.update(id, { status: TimeOffStatus.CANCELLED, note: note ?? null });
 
       // Immediately re-fetch balance from HCM so the restored days are visible without
       // waiting for the next batch sync
@@ -211,7 +225,7 @@ export class TimeOffService {
     return this.requestRepo.findOne({ where: { id } });
   }
 
-  async rejectRequest(id: string): Promise<TimeOffRequest> {
+  async rejectRequest(id: string, note?: string): Promise<TimeOffRequest> {
     const request = await this.requestRepo.findOne({ where: { id } });
     if (!request) {
       throw new NotFoundException(`Request ${id} not found`);
@@ -222,7 +236,7 @@ export class TimeOffService {
       );
     }
 
-    await this.requestRepo.update(id, { status: TimeOffStatus.REJECTED });
+    await this.requestRepo.update(id, { status: TimeOffStatus.REJECTED, note: note ?? null });
 
     // Release pending balance
     const balance = await this.balanceRepo.findOne({

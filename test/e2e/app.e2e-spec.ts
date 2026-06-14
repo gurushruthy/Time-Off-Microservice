@@ -540,6 +540,197 @@ describe('Time-Off Microservice E2E', () => {
     expect(res.status).toBe(400);
   });
 
+  // ─── Scenario 17a-note: Reject with note → employee sees note ───────────
+  it('Scenario 17a-note: Reject with note → employee sees note on request', async () => {
+    const createRes = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-note-reject-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-02',
+        daysRequested: 1,
+      });
+    expect(createRes.status).toBe(201);
+    const requestId = createRes.body.id;
+
+    await asManager(request(app.getHttpServer())
+      .patch(`/time-off/requests/${requestId}/reject`)
+      .send({ note: 'Insufficient balance, please resubmit for fewer days' }))
+      .expect(200);
+
+    const listRes = await asEmployee(request(app.getHttpServer())
+      .get('/time-off/requests?employeeId=employee-1'));
+    const req = listRes.body.find((r: any) => r.id === requestId);
+    expect(req.status).toBe('REJECTED');
+    expect(req.note).toBe('Insufficient balance, please resubmit for fewer days');
+  });
+
+  it('Scenario 17b-note: Cancel with note → note is saved on request', async () => {
+    const createRes = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-note-cancel-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-02',
+        daysRequested: 1,
+      });
+    expect(createRes.status).toBe(201);
+    const requestId = createRes.body.id;
+
+    const cancelRes = await asEmployee(request(app.getHttpServer())
+      .patch(`/time-off/requests/${requestId}/cancel`)
+      .send({ note: 'Change of plans' }));
+    expect(cancelRes.status).toBe(200);
+    expect(cancelRes.body.note).toBe('Change of plans');
+  });
+
+  it('Scenario 17c-note: Reject without note → note is null', async () => {
+    const createRes = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-note-null-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-02',
+        daysRequested: 1,
+      });
+    expect(createRes.status).toBe(201);
+
+    const rejectRes = await asManager(request(app.getHttpServer())
+      .patch(`/time-off/requests/${createRes.body.id}/reject`));
+    expect(rejectRes.status).toBe(200);
+    expect(rejectRes.body.note).toBeNull();
+  });
+
+  // ─── Scenario 17a: Filter requests by status ─────────────────────────────
+  it('Scenario 17a: GET requests?status=PENDING returns only PENDING requests', async () => {
+    const createRes = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-filter-pending-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-02',
+        daysRequested: 1,
+      });
+    expect(createRes.status).toBe(201);
+    const pendingId = createRes.body.id;
+
+    // Approve it so we have one PENDING and one APPROVED
+    const createRes2 = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-filter-approved-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-08-01',
+        endDate: '2026-08-02',
+        daysRequested: 1,
+      });
+    expect(createRes2.status).toBe(201);
+    await asManager(request(app.getHttpServer())
+      .patch(`/time-off/requests/${createRes2.body.id}/approve`))
+      .expect(200);
+
+    const res = await asEmployee(request(app.getHttpServer())
+      .get('/time-off/requests?employeeId=employee-1&status=PENDING'));
+    expect(res.status).toBe(200);
+    expect(res.body.every((r: any) => r.status === 'PENDING')).toBe(true);
+    expect(res.body.find((r: any) => r.id === pendingId)).toBeDefined();
+  });
+
+  it('Scenario 17b: GET requests?status=APPROVED returns only APPROVED requests', async () => {
+    const createRes = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-filter-approved2-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-02',
+        daysRequested: 1,
+      });
+    expect(createRes.status).toBe(201);
+    await asManager(request(app.getHttpServer())
+      .patch(`/time-off/requests/${createRes.body.id}/approve`))
+      .expect(200);
+
+    const res = await asEmployee(request(app.getHttpServer())
+      .get('/time-off/requests?employeeId=employee-1&status=APPROVED'));
+    expect(res.status).toBe(200);
+    expect(res.body.length).toBeGreaterThan(0);
+    expect(res.body.every((r: any) => r.status === 'APPROVED')).toBe(true);
+  });
+
+  it('Scenario 17c: GET requests without status filter returns all statuses', async () => {
+    const createRes = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-filter-all-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-02',
+        daysRequested: 1,
+      });
+    expect(createRes.status).toBe(201);
+    await asManager(request(app.getHttpServer())
+      .patch(`/time-off/requests/${createRes.body.id}/approve`))
+      .expect(200);
+
+    const createRes2 = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-filter-all2-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-08-01',
+        endDate: '2026-08-02',
+        daysRequested: 1,
+      });
+    expect(createRes2.status).toBe(201);
+
+    const res = await asEmployee(request(app.getHttpServer())
+      .get('/time-off/requests?employeeId=employee-1'));
+    expect(res.status).toBe(200);
+    const statuses = res.body.map((r: any) => r.status);
+    expect(statuses).toContain('APPROVED');
+    expect(statuses).toContain('PENDING');
+  });
+
+  // ─── Scenario 17d: Invalid status filter → 400 ───────────────────────────
+  it('Scenario 17d: GET requests?status=INVALID → 400', async () => {
+    const res = await asEmployee(request(app.getHttpServer())
+      .get('/time-off/requests?employeeId=employee-1&status=INVALID'));
+    expect(res.status).toBe(400);
+  });
+
+  // ─── Scenario 17e: Note exceeds max length → 400 ─────────────────────────
+  it('Scenario 17e: Reject with note > 500 chars → 400', async () => {
+    const createRes = await asEmployee(request(app.getHttpServer())
+      .post('/time-off/requests')
+      .set('Idempotency-Key', `e2e-note-long-${Date.now()}`))
+      .send({
+        employeeId: 'employee-1',
+        locationId: 'location-1',
+        startDate: '2026-07-01',
+        endDate: '2026-07-02',
+        daysRequested: 1,
+      });
+    expect(createRes.status).toBe(201);
+
+    const res = await asManager(request(app.getHttpServer())
+      .patch(`/time-off/requests/${createRes.body.id}/reject`)
+      .send({ note: 'a'.repeat(501) }));
+    expect(res.status).toBe(400);
+  });
+
   // ─── Scenario 17: Overlapping dates → 422 ────────────────────────────────
   it('Scenario 17: Overlapping dates → 422', async () => {
     const createRes = await asEmployee(request(app.getHttpServer())

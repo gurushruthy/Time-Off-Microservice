@@ -212,6 +212,33 @@ describe('TimeOffService', () => {
     });
   });
 
+  describe('listRequests', () => {
+    it('should throw BadRequestException for an invalid status value', async () => {
+      await expect(service.listRequests('emp-1', 'INVALID')).rejects.toThrow(BadRequestException);
+    });
+
+    it('should return all requests when no status filter is given', async () => {
+      const reqs = [makeRequest(), makeRequest({ id: 'req-2', status: TimeOffStatus.APPROVED })];
+      requestRepo.find.mockResolvedValue(reqs);
+
+      const result = await service.listRequests('emp-1');
+      expect(requestRepo.find).toHaveBeenCalledWith({ where: { employeeId: 'emp-1' }, order: { createdAt: 'DESC' } });
+      expect(result).toHaveLength(2);
+    });
+
+    it('should filter by status when status is provided', async () => {
+      const pendingReqs = [makeRequest()];
+      requestRepo.find.mockResolvedValue(pendingReqs);
+
+      const result = await service.listRequests('emp-1', 'PENDING');
+      expect(requestRepo.find).toHaveBeenCalledWith({
+        where: { employeeId: 'emp-1', status: TimeOffStatus.PENDING },
+        order: { createdAt: 'DESC' },
+      });
+      expect(result).toHaveLength(1);
+    });
+  });
+
   describe('cancelRequest', () => {
     it('should cancel a PENDING request and release pendingBalance', async () => {
       const pendingReq = makeRequest({ status: TimeOffStatus.PENDING });
@@ -223,7 +250,7 @@ describe('TimeOffService', () => {
       balanceService.decrementPending.mockResolvedValue(undefined);
 
       const result = await service.cancelRequest('req-1', 'emp-1');
-      expect(requestRepo.update).toHaveBeenCalledWith('req-1', { status: TimeOffStatus.CANCELLED });
+      expect(requestRepo.update).toHaveBeenCalledWith('req-1', { status: TimeOffStatus.CANCELLED, note: null });
       expect(balanceService.decrementPending).toHaveBeenCalled();
       expect(result.status).toBe(TimeOffStatus.CANCELLED);
     });
@@ -236,6 +263,14 @@ describe('TimeOffService', () => {
 
     it('should throw UnprocessableEntityException when cancelling a REJECTED request', async () => {
       requestRepo.findOne.mockResolvedValue(makeRequest({ status: TimeOffStatus.REJECTED }));
+
+      await expect(service.cancelRequest('req-1', 'emp-1')).rejects.toThrow(UnprocessableEntityException);
+    });
+
+    it('should throw UnprocessableEntityException when cancelling APPROVED request with null hcmTransactionId', async () => {
+      requestRepo.findOne.mockResolvedValue(
+        makeRequest({ status: TimeOffStatus.APPROVED, hcmTransactionId: null }),
+      );
 
       await expect(service.cancelRequest('req-1', 'emp-1')).rejects.toThrow(UnprocessableEntityException);
     });
@@ -293,7 +328,7 @@ describe('TimeOffService', () => {
       balanceService.decrementPending.mockResolvedValue(undefined);
 
       const result = await service.rejectRequest('req-1');
-      expect(requestRepo.update).toHaveBeenCalledWith('req-1', { status: TimeOffStatus.REJECTED });
+      expect(requestRepo.update).toHaveBeenCalledWith('req-1', { status: TimeOffStatus.REJECTED, note: null });
       expect(balanceService.decrementPending).toHaveBeenCalled();
       expect(result.status).toBe(TimeOffStatus.REJECTED);
     });

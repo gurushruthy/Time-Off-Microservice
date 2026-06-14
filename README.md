@@ -117,8 +117,8 @@ Missing `X-User-Role` → 401. Wrong role for the endpoint → 403. Employee acc
 |---|---|---|
 | `GET` | `/time-off/balance?employeeId=&locationId=` | Get balance. Live HCM fetch if cache is stale (>15 min). |
 | `POST` | `/time-off/requests` | Submit a request. Requires `Idempotency-Key` header. |
-| `GET` | `/time-off/requests?employeeId=` | List own requests. |
-| `PATCH` | `/time-off/requests/:id/cancel` | Cancel a PENDING or APPROVED request. |
+| `GET` | `/time-off/requests?employeeId=&status=` | List own requests. `status` is optional (PENDING, APPROVED, REJECTED, CANCELLED). |
+| `PATCH` | `/time-off/requests/:id/cancel` | Cancel a PENDING or APPROVED request. Optional `{ "note": "..." }` body. |
 
 ### Manager
 
@@ -126,7 +126,7 @@ Missing `X-User-Role` → 401. Wrong role for the endpoint → 403. Employee acc
 |---|---|---|
 | `GET` | `/time-off/requests/pending` | List all PENDING requests across all employees. |
 | `PATCH` | `/time-off/requests/:id/approve` | Approve a request (commits deduction to HCM). |
-| `PATCH` | `/time-off/requests/:id/reject` | Reject a request (releases pending hold). |
+| `PATCH` | `/time-off/requests/:id/reject` | Reject a request (releases pending hold). Optional `{ "note": "..." }` body visible to the employee. |
 
 ### Admin
 

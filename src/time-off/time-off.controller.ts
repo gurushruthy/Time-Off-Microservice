@@ -16,6 +16,7 @@ import {
 import { TimeOffService } from './time-off.service';
 import { BalanceService } from '../balance/balance.service';
 import { CreateRequestDto } from './dto/create-request.dto';
+import { NoteDto } from './dto/note.dto';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 
@@ -66,6 +67,7 @@ export class TimeOffController {
   @Roles('employee', 'manager')
   async listRequests(
     @Query('employeeId') employeeId: string,
+    @Query('status') status: string,
     @Headers('x-user-role') role: string,
     @Headers('x-user-id') userId: string,
   ) {
@@ -75,7 +77,7 @@ export class TimeOffController {
     if (role === 'employee' && userId !== employeeId) {
       throw new ForbiddenException('Employees can only view their own requests');
     }
-    return this.timeOffService.listRequests(employeeId);
+    return this.timeOffService.listRequests(employeeId, status);
   }
 
   @Patch('requests/:id/cancel')
@@ -83,8 +85,9 @@ export class TimeOffController {
   async cancelRequest(
     @Param('id') id: string,
     @Headers('x-user-id') userId: string,
+    @Body() dto: NoteDto,
   ) {
-    return this.timeOffService.cancelRequest(id, userId);
+    return this.timeOffService.cancelRequest(id, userId, dto.note);
   }
 
   @Get('requests/pending')
@@ -101,7 +104,10 @@ export class TimeOffController {
 
   @Patch('requests/:id/reject')
   @Roles('manager')
-  async rejectRequest(@Param('id') id: string) {
-    return this.timeOffService.rejectRequest(id);
+  async rejectRequest(
+    @Param('id') id: string,
+    @Body() dto: NoteDto,
+  ) {
+    return this.timeOffService.rejectRequest(id, dto.note);
   }
 }
