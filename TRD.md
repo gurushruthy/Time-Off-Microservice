@@ -192,7 +192,8 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 
 **Primary path (HCM cancel API available):**
 
-1. Call HCM to cancel the transaction (`hcmTransactionId`). HCM reverses the deduction on its side.
+1. Guard: if `hcmTransactionId` is null (should not happen in normal flow but possible if a partial failure occurred during approval), return 422 — do not call HCM.
+2. Call HCM to cancel the transaction (`hcmTransactionId`). HCM reverses the deduction on its side.
 2. If HCM errors → return 503, leave all local state unchanged (fail closed — request stays APPROVED, cache untouched).
 3. On HCM success: set status=CANCELLED.
 4. Immediately re-fetch `hcmAvailableBalance` from HCM's realtime API and overwrite the local cache. Because HCM has already restored the days, the fresh fetch reflects the correct restored balance without waiting for the next batch sync. ReadyOn does **not** manually add days back to the cache — it trusts HCM's response as the source of truth.
@@ -372,6 +373,8 @@ Full HTTP flow against a running NestJS app (port 3000) with the mock HCM server
 | 17a | Filter requests by status=PENDING → only PENDING returned |
 | 17b | Filter requests by status=APPROVED → only APPROVED returned |
 | 17c | No status filter → all statuses returned |
+| 17d | Invalid ?status= value → 400 |
+| 17e | Note exceeding 500 characters → 400 |
 | 17 | Overlapping dates → 422 |
 
 ---
