@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json.schemastore.org/nest-cli",
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "src",
+  "monorepo": true,
+  "root": "src",
+  "projects": {
+    "time-off": {
+      "type": "application",
+      "root": "src",
+      "entryFile": "main",
+      "sourceRoot": "src",
+      "compilerOptions": {
+        "tsConfigPath": "tsconfig.json"
+      }
+    },
+    "mock-hcm": {
+      "type": "application",
+      "root": "mock-hcm",
+      "entryFile": "mock-hcm.main",
+      "sourceRoot": "mock-hcm",
+      "compilerOptions": {
+        "tsConfigPath": "tsconfig.json"
+      }
+    }
+  },
+  "compilerOptions": {
+    "deleteOutDir": true
+  }
+}
