@@ -210,7 +210,9 @@ The distinction matters operationally: `hcmAvailableBalance` can be reconstructe
 1. Call HCM batch endpoint — receives full corpus of balances.
 2. Upsert `hcmAvailableBalance` and `lastSyncedAt` for each record.
 3. `pendingBalance` is never touched — it reflects ReadyOn's uncommitted holds, which HCM does not know about.
-4. If new `hcmAvailableBalance` < current `pendingBalance`: no action. Existing PENDING requests will naturally fail the live HCM check on approval. **Production enhancement:** The cron could auto-reject PENDING requests that can no longer be fulfilled, setting status=REJECTED with an auto-generated note (e.g. "Automatically rejected: insufficient balance after HCM sync"). This clears the manager's queue and notifies the employee immediately rather than waiting for a manager action that will always result in rejection anyway. The key open question is ordering — if an employee has multiple PENDING requests and the balance only covers some of them, a policy must be defined for which to reject (e.g. newest first, largest first, or all). This ordering decision requires product input and is left as a future enhancement.
+4. If new `hcmAvailableBalance` < current `pendingBalance`: no action. Existing PENDING requests will naturally fail the live HCM check on approval.
+
+   **Production enhancement:** The cron could auto-reject PENDING requests that can no longer be fulfilled, setting status=REJECTED with an auto-generated note (e.g. "Automatically rejected: insufficient balance after HCM sync"). This clears the manager's queue without requiring any manual action. The key open question is ordering — if an employee has multiple PENDING requests and the balance only covers some of them, a policy must be defined for which to reject (e.g. newest first, largest first, or all). This ordering decision requires product input and is left as a future enhancement.
 5. Log to `balance_sync_log` with source=BATCH_CRON. Other sources used elsewhere: REALTIME_PULL (logged on stale cache refresh during `GET /balance`), REQUEST (logged on live fetch during `POST /time-off/requests`).
 
 ---
